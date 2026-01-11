@@ -1,5 +1,4 @@
 #if YOOASSET_INSTALLED
-using Azathrix.Framework.Interfaces;
 using Cysharp.Threading.Tasks;
 using YooAsset;
 
@@ -21,9 +20,9 @@ namespace Azathrix.YooAssetExtension
     }
 
     /// <summary>
-    /// 热更新流程接口
+    /// 热更新流程接口（独立于系统，在系统注册前执行）
     /// </summary>
-    public interface IHotUpdateFlow : ISystem
+    public interface IHotUpdateFlow
     {
         /// <summary>
         /// 当前状态

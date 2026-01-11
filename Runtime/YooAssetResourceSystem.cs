@@ -1,5 +1,6 @@
 #if YOOASSET_INSTALLED
 using System;
+using Azathrix.Framework.Core;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Azathrix.Framework.Core.Attributes;
@@ -16,18 +17,12 @@ namespace Azathrix.YooAssetExtension
     /// YooAsset资源系统实现
     /// </summary>
     [SystemPriority(-1000)]
-    public class YooAssetResourceSystem : IResourcesSystem, ISystemInitialize,
-        IHotUpdateFlow, IDownloadMonitor, ICacheManager
+    public class YooAssetResourceSystem : IResourcesSystem, IDownloadMonitor, ICacheManager, ISystemInitialize
     {
         private ResourcePackage _defaultPackage;
         private YooAssetSettings _settings;
         private ResourceDownloaderOperation _currentDownloader;
         private DownloadManager _downloadManager;
-        private string _currentVersion;
-
-        // IHotUpdateFlow
-        public HotUpdateState State { get; private set; }
-        public string ErrorMessage { get; private set; }
 
         // IDownloadMonitor
         public event Action<DownloadProgress> OnProgressChanged;
@@ -45,169 +40,6 @@ namespace Azathrix.YooAssetExtension
         /// 获取默认资源包
         /// </summary>
         public ResourcePackage DefaultPackage => _defaultPackage;
-
-        /// <summary>
-        /// 当前版本
-        /// </summary>
-        public string CurrentVersion => _currentVersion;
-
-        public async UniTask OnInitializeAsync()
-        {
-            _settings = YooAssetSettings.Instance;
-            YooAssets.Initialize();
-            Log.Info("[YooAsset] Initialized");
-        }
-
-        #region IHotUpdateFlow
-
-        public async UniTask<bool> InitPackageAsync(string packageName = null)
-        {
-            State = HotUpdateState.InitPackage;
-            packageName ??= _settings.defaultPackageName;
-
-            _defaultPackage = YooAssets.TryGetPackage(packageName)
-                ?? YooAssets.CreatePackage(packageName);
-            YooAssets.SetDefaultPackage(_defaultPackage);
-
-            InitializationOperation initOp = _settings.playMode switch
-            {
-                EPlayMode.EditorSimulateMode => InitEditorSimulate(packageName),
-                EPlayMode.OfflinePlayMode => InitOffline(packageName),
-                EPlayMode.HostPlayMode => InitHost(packageName),
-                EPlayMode.WebPlayMode => InitWebGL(packageName),
-                _ => null
-            };
-
-            if (initOp == null)
-            {
-                ErrorMessage = "Invalid play mode";
-                State = HotUpdateState.Failed;
-                return false;
-            }
-
-            await initOp.ToUniTask();
-
-            if (initOp.Status != EOperationStatus.Succeed)
-            {
-                ErrorMessage = initOp.Error;
-                State = HotUpdateState.Failed;
-                Log.Error($"[YooAsset] Package init failed: {initOp.Error}");
-                return false;
-            }
-
-            _downloadManager = new DownloadManager(_defaultPackage, _settings);
-            Log.Info($"[YooAsset] Package {packageName} initialized");
-            return true;
-        }
-
-        public async UniTask<bool> UpdateVersionAsync()
-        {
-            State = HotUpdateState.UpdateVersion;
-            var op = _defaultPackage.UpdatePackageVersionAsync();
-            await op.ToUniTask();
-
-            if (op.Status != EOperationStatus.Succeed)
-            {
-                ErrorMessage = op.Error;
-                State = HotUpdateState.Failed;
-                Log.Error($"[YooAsset] Update version failed: {op.Error}");
-                return false;
-            }
-
-            _currentVersion = op.PackageVersion;
-            Log.Info($"[YooAsset] Version: {_currentVersion}");
-            return true;
-        }
-
-        public async UniTask<bool> UpdateManifestAsync()
-        {
-            State = HotUpdateState.UpdateManifest;
-
-            if (string.IsNullOrEmpty(_currentVersion))
-            {
-                var versionOp = _defaultPackage.UpdatePackageVersionAsync();
-                await versionOp.ToUniTask();
-                if (versionOp.Status != EOperationStatus.Succeed)
-                {
-                    ErrorMessage = versionOp.Error;
-                    State = HotUpdateState.Failed;
-                    return false;
-                }
-                _currentVersion = versionOp.PackageVersion;
-            }
-
-            var op = _defaultPackage.UpdatePackageManifestAsync(_currentVersion);
-            await op.ToUniTask();
-
-            if (op.Status != EOperationStatus.Succeed)
-            {
-                ErrorMessage = op.Error;
-                State = HotUpdateState.Failed;
-                Log.Error($"[YooAsset] Update manifest failed: {op.Error}");
-                return false;
-            }
-
-            Log.Info("[YooAsset] Manifest updated");
-            return true;
-        }
-
-        public async UniTask<ResourceDownloaderOperation> CreateDownloaderByTagsAsync(params string[] tags)
-        {
-            State = HotUpdateState.CreateDownloader;
-            return _defaultPackage.CreateResourceDownloader(tags,
-                _settings.downloadingMaxNum, _settings.failedTryAgain);
-        }
-
-        public async UniTask<ResourceDownloaderOperation> CreateDownloaderByPathsAsync(params string[] paths)
-        {
-            State = HotUpdateState.CreateDownloader;
-            return _defaultPackage.CreateBundleDownloader(paths,
-                _settings.downloadingMaxNum, _settings.failedTryAgain);
-        }
-
-        public async UniTask<bool> RunFullUpdateAsync(string[] downloadTags = null)
-        {
-            if (!await InitPackageAsync()) return false;
-
-            if (_settings.playMode == EPlayMode.HostPlayMode)
-            {
-                if (!await UpdateVersionAsync()) return false;
-                if (!await UpdateManifestAsync()) return false;
-
-                var tags = downloadTags ?? _settings.autoDownloadTags;
-                if (tags != null && tags.Length > 0)
-                {
-                    var downloader = await CreateDownloaderByTagsAsync(tags);
-                    if (downloader.TotalDownloadCount > 0)
-                    {
-                        Log.Info($"[YooAsset] Need download {downloader.TotalDownloadCount} files, {downloader.TotalDownloadBytes} bytes");
-
-                        _currentDownloader = downloader;
-                        State = HotUpdateState.Downloading;
-                        StartMonitor();
-                        downloader.BeginDownload();
-                        await downloader.ToUniTask();
-                        StopMonitor();
-
-                        if (downloader.Status != EOperationStatus.Succeed)
-                        {
-                            ErrorMessage = downloader.Error;
-                            State = HotUpdateState.Failed;
-                            Log.Error($"[YooAsset] Download failed: {downloader.Error}");
-                            return false;
-                        }
-
-                        OnDownloadComplete?.Invoke();
-                    }
-                }
-            }
-
-            State = HotUpdateState.Done;
-            Log.Info("[YooAsset] Hot update completed");
-            return true;
-        }
-
-        #endregion
 
         #region IDownloadMonitor
 
@@ -346,60 +178,20 @@ namespace Azathrix.YooAssetExtension
 
         #endregion
 
-        #region Private Helpers
-
-        private InitializationOperation InitEditorSimulate(string packageName)
+        public UniTask OnInitializeAsync()
         {
-            var param = new EditorSimulateModeParameters();
-            param.SimulateManifestFilePath = EditorSimulateModeHelper.SimulateBuild(packageName);
-            return _defaultPackage.InitializeAsync(param);
+            var system = AzathrixFramework.GetSystem<IResourcesSystem>();
+            Log.Info(system);
+            // 获取已初始化的默认包（由 HotUpdatePhase 初始化）
+            _settings = YooAssetSettings.Instance;
+            _defaultPackage = YooAssets.GetPackage(_settings.defaultPackageName);
+            if (_defaultPackage != null)
+                _downloadManager = new DownloadManager(_defaultPackage, _settings);
+
+            //将框架的资源加载切到YooAsset系统
+            AzathrixFramework.ResourcesLoader = this;
+            return UniTask.CompletedTask;
         }
-
-        private InitializationOperation InitOffline(string packageName)
-        {
-            return _defaultPackage.InitializeAsync(new OfflinePlayModeParameters());
-        }
-
-        private InitializationOperation InitHost(string packageName)
-        {
-            var param = new HostPlayModeParameters();
-            param.BuildinQueryServices = new GameQueryServices();
-            param.RemoteServices = new RemoteServices(_settings.hostServerURL, _settings.fallbackHostServerURL);
-            return _defaultPackage.InitializeAsync(param);
-        }
-
-        private InitializationOperation InitWebGL(string packageName)
-        {
-            var param = new WebPlayModeParameters();
-            param.BuildinQueryServices = new GameQueryServices();
-            param.RemoteServices = new RemoteServices(_settings.hostServerURL, _settings.fallbackHostServerURL);
-            return _defaultPackage.InitializeAsync(param);
-        }
-
-        private class GameQueryServices : IBuildinQueryServices
-        {
-            public bool Query(string packageName, string fileName, string fileCRC) => false;
-            public bool QueryStreamingAssets(string packageName, string fileName) => false;
-        }
-
-        private class RemoteServices : IRemoteServices
-        {
-            private readonly string _defaultUrl;
-            private readonly string _fallbackUrl;
-
-            public RemoteServices(string defaultUrl, string fallbackUrl)
-            {
-                _defaultUrl = defaultUrl;
-                _fallbackUrl = fallbackUrl;
-            }
-
-            public string GetRemoteMainURL(string fileName) => $"{_defaultUrl}/{fileName}";
-
-            public string GetRemoteFallbackURL(string fileName) =>
-                string.IsNullOrEmpty(_fallbackUrl) ? GetRemoteMainURL(fileName) : $"{_fallbackUrl}/{fileName}";
-        }
-
-        #endregion
     }
 }
 #endif
