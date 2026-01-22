@@ -12,5 +12,16 @@
         "com.azathrix.framework": "0.0.5",
         "com.azathrix.unitask": "2.5.10",
         "com.azathrix.pack-flow": "1.0.1"
-    }
+    },
+    "samples": [
+        {
+            "displayName": "Tests",
+            "description": "运行时的流程测试",
+            "path": "Tests~"
+        },
+        {
+            "displayName": "Samples",
+            "description": "挂载到GameObject上Demo",
+            "path": "Samples~"
+        }]
 }
